@@ -7,7 +7,10 @@ edition = "2021"
 
 [dependencies]
 futures = "0.3.18"
+nix = "0.23.0"
+polling = "2.2.0"
 scoped-tls = "1.0.0"
+tokio = { version = "1.14.0", features = ["full"] }
 waker-fn = "1.1.0"
 
 [features]

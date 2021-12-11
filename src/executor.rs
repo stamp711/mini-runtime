@@ -10,6 +10,8 @@ use futures::future::LocalBoxFuture;
 use futures::{pin_mut, FutureExt};
 use scoped_tls::scoped_thread_local;
 
+use crate::reactor::{Reactor, REACTOR};
+
 scoped_thread_local!(static EXECUTOR: LocalExecutor);
 
 pub struct LocalExecutor {
@@ -28,7 +30,7 @@ impl LocalExecutor {
             future: RefCell::new(future.boxed_local()),
             name,
         };
-        println!("spawn: task {}", task);
+        println!("[executor] spawn {}", task);
         EXECUTOR.with(|slot| slot.task_queue.enqueue(Rc::new(task)));
     }
 
@@ -41,54 +43,59 @@ impl LocalExecutor {
     }
 
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
-        println!("block_on: start");
+        println!("[executor] start");
 
-        let output = EXECUTOR.set(self, || {
-            let root_future = future;
-            let root_woken = RefCell::new(true);
+        let output = REACTOR.set(&RefCell::new(Reactor::new()), || {
+            EXECUTOR.set(self, || {
+                let root_future = future;
+                let root_woken = Rc::new(RefCell::new(true));
 
-            let root_woken_for_waker = root_woken.clone();
-            let waker = waker_fn(move || {
-                println!("waking: task <root>");
-                *root_woken_for_waker.borrow_mut() = true;
-            });
+                let root_woken_ = root_woken.clone();
+                let waker = waker_fn(move || {
+                    println!("waking: task <root>");
+                    *root_woken_.borrow_mut() = true;
+                });
 
-            let cx = &mut Context::from_waker(&waker);
+                let cx = &mut Context::from_waker(&waker);
 
-            pin_mut!(root_future);
+                pin_mut!(root_future);
 
-            loop {
-                // if the root future is woken, poll it
-                if *root_woken.borrow() {
-                    if let Poll::Ready(res) = root_future.as_mut().poll(cx) {
-                        return res;
+                loop {
+                    if *root_woken.borrow() == false && self.task_queue.len() == 0 {
+                        println!("[executor] no task available, wait on reactor");
+                        REACTOR.with(|reactor| reactor.borrow_mut().wait());
                     }
-                }
 
-                // consume tasks in queue
-                while let Some(task) = self.task_queue.dequeue() {
-                    let task_ = task.clone();
-                    let mut waker = waker_fn(move || {
-                        let task = task_.clone();
-                        println!("waking: task {}", task);
-                        EXECUTOR.with(|slot| slot.task_queue.enqueue(task));
-                    });
-                    let _ = task
-                        .future
-                        .borrow_mut()
-                        .poll_unpin(&mut Context::from_waker(&mut waker));
-                }
-
-                // if the root future is woken, poll it
-                if *root_woken.borrow() {
-                    if let Poll::Ready(output) = root_future.as_mut().poll(cx) {
-                        break output;
+                    // if the root future is woken, poll it
+                    if *root_woken.borrow() == true {
+                        println!("[executor] root task available, polling");
+                        *root_woken.borrow_mut() = false;
+                        if let Poll::Ready(res) = root_future.as_mut().poll(cx) {
+                            return res;
+                        }
                     }
+
+                    // consume tasks in queue
+                    println!("[executor] draining task queue");
+                    while let Some(task) = self.task_queue.dequeue() {
+                        println!("[executor] task {} available, polling", task);
+                        let task_ = task.clone();
+                        let mut waker = waker_fn(move || {
+                            let task = task_.clone();
+                            println!("waking: task {}", task);
+                            EXECUTOR.with(|slot| slot.task_queue.enqueue(task));
+                        });
+                        let _ = task
+                            .future
+                            .borrow_mut()
+                            .poll_unpin(&mut Context::from_waker(&mut waker));
+                    }
+                    println!("[executor] task queue drained");
                 }
-            }
+            })
         });
 
-        println!("block_on: finish");
+        println!("[executor] finish");
         output
     }
 }
@@ -110,18 +117,16 @@ impl TaskQueue {
         }
     }
 
+    fn len(&self) -> usize {
+        self.queue.borrow().len()
+    }
+
     fn enqueue(&self, runnable: Rc<Task>) {
-        println!("enqueue: task {}", runnable);
         self.queue.borrow_mut().push_back(runnable);
     }
 
     fn dequeue(&self) -> Option<Rc<Task>> {
-        let maybe_task = self.queue.borrow_mut().pop_front();
-        match &maybe_task {
-            Some(task) => println!("dequeue: task {}", task),
-            None => println!("dequeue: no task left"),
-        }
-        maybe_task
+        self.queue.borrow_mut().pop_front()
     }
 }
 
