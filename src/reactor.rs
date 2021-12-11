@@ -116,5 +116,7 @@ impl Reactor {
                 }
             }
         }
+
+        println!("[reactor] dispatching complete");
     }
 }

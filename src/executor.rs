@@ -85,10 +85,18 @@ impl LocalExecutor {
                             println!("waking: task {}", task);
                             EXECUTOR.with(|slot| slot.task_queue.enqueue(task));
                         });
-                        let _ = task
+                        match task
                             .future
                             .borrow_mut()
-                            .poll_unpin(&mut Context::from_waker(&mut waker));
+                            .poll_unpin(&mut Context::from_waker(&mut waker))
+                        {
+                            Poll::Ready(_) => {
+                                println!("[executor] task {} finished", task)
+                            }
+                            Poll::Pending => {
+                                println!("[executor] poll task {}: pending", task)
+                            }
+                        }
                     }
                     println!("[executor] task queue drained");
                 }
